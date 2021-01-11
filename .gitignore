@@ -4,4 +4,4 @@ config_vocoder.json
 config.json
 scale_stats.npy
 .venv
-TTS/
+TTS
