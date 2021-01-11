@@ -7,7 +7,7 @@ sudo apt install python3.6 python3.6-dev espeak
 
 
 
-mkdir .venv
+mkdir -p .venv
 virtualenv -p /usr/bin/python3.6 $WORKDIR/.venv
 source $WORKDIR/.venv/bin/activate
 
