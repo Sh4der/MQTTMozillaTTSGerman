@@ -1,0 +1,7 @@
+vocoder_model.pth.tar
+tts_model.pth.tar
+config_vocoder.json
+config.json
+scale_stats.npy
+.venv
+TTS/

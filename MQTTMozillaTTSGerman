@@ -1,0 +1,157 @@
+#!/usr/bin/env python
+import argparse
+from pathlib import Path
+import os
+import torch
+import time
+import IPython
+import librosa
+
+#mqtt
+import json
+
+# pip install paho-mqtt
+import paho.mqtt.client as mqtt
+
+
+from TTS.tts.utils.generic_utils import setup_model
+from TTS.tts.utils.synthesis import synthesis
+from TTS.tts.utils.text.symbols import symbols, phonemes
+from TTS.utils.io import load_config
+from TTS.utils.audio import AudioProcessor
+from TTS.tts.utils.io import load_checkpoint
+from TTS.vocoder.utils.generic_utils import setup_generator
+from TTS.vocoder.utils.io import load_checkpoint as load_vocoder_checkpoint
+
+class GerTTS:
+    
+    def __init__(self, tts_model_path, tts_config_path, vocoder_model_path, vocoder_config_path, use_cuda=False):
+        self.TTS_MODEL_PATH = tts_model_path
+        self.TTS_CONFIG_PATH = tts_config_path
+        self.VOCODER_MODEL_PATH = vocoder_model_path
+        self.VOCODER_CONFIG_PATH = vocoder_config_path
+        self.use_cuda = use_cuda
+        # load configs
+        self.TTS_CONFIG = load_config(self.TTS_CONFIG_PATH)
+        self.VOCODER_CONFIG = load_config(self.VOCODER_CONFIG_PATH)
+        # load the audio processor
+        self.ap = AudioProcessor(**self.TTS_CONFIG.audio) 
+
+        # LOAD TTS MODEL
+        # multi speaker 
+        self.speaker_id = None
+        speakers = []
+
+        # load the model
+        num_chars = len(phonemes) if self.TTS_CONFIG.use_phonemes else len(symbols)
+        self.model = setup_model(num_chars, len(speakers), self.TTS_CONFIG)
+
+        self.model, _ = load_checkpoint(self.model, self.TTS_MODEL_PATH, use_cuda=self.use_cuda)
+        self.model.eval();
+
+        # LOAD VOCODER MODEL
+        self.vocoder_model = setup_generator(self.VOCODER_CONFIG)
+        self.vocoder_model, _ = load_vocoder_checkpoint(self.vocoder_model, checkpoint_path=self.VOCODER_MODEL_PATH)
+        self.vocoder_model.remove_weight_norm()
+        self.vocoder_model.inference_padding = 0
+
+        ap_vocoder = AudioProcessor(**self.VOCODER_CONFIG['audio'])    
+        if use_cuda:
+            vocoder_model.cuda()
+        self.vocoder_model.eval();
+
+    def tts(self, text, use_gl=False, figures=True):
+        t_1 = time.time()
+        waveform, alignment, mel_spec, mel_postnet_spec, stop_tokens, inputs = synthesis(self.model, text, self.TTS_CONFIG, self.use_cuda, self.ap, self.speaker_id, style_wav=None,
+                                                                                truncated=False, enable_eos_bos_chars=self.TTS_CONFIG.enable_eos_bos_chars)
+        # mel_postnet_spec = ap._denormalize(mel_postnet_spec.T)
+        if not use_gl:
+            waveform = self.vocoder_model.inference(torch.FloatTensor(mel_postnet_spec.T).unsqueeze(0))
+            waveform = waveform.flatten()
+        if self.use_cuda:
+            waveform = waveform.cpu()
+        waveform = waveform.numpy()
+        rtf = (time.time() - t_1) / (len(waveform) / self.ap.sample_rate)
+        tps = (time.time() - t_1) / len(waveform)
+        print(waveform.shape)
+        print(" > Run-time: {}".format(time.time() - t_1))
+        print(" > Real-time factor: {}".format(rtf))
+        print(" > Time per step: {}".format(tps))
+        IPython.display.display(IPython.display.Audio(waveform, rate=self.TTS_CONFIG.audio['sample_rate'], autoplay=True))  
+        return alignment, mel_postnet_spec, stop_tokens, waveform
+
+
+
+
+
+def getArgs() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="MQTTMozillaTTSGerman")
+
+    parser.add_argument(
+        "--tts_model", required=True, help="Path to the TTS model"
+    )
+    parser.add_argument(
+        "--tts_config", required=True, help="Path to the TTS config"
+    )
+    parser.add_argument(
+        "--vocoder_model", required=True, help="Path to the vcoder model"
+    )
+    parser.add_argument(
+        "--vocoder_config", required=True, help="Path to the vcoder config"
+    )
+    parser.add_argument(
+        "--cuda", help="Enable Cuda (Not for recommend for raspberry)"
+    )
+
+    return parser.parse_args()
+
+
+
+
+
+
+
+
+
+def on_connect(client, userdata, flags, rc):
+    """Called when connected to MQTT broker."""
+    client.subscribe("hermes/tts/say")
+    print("Connected. Waiting for intents.")
+
+
+def on_disconnect(client, userdata, flags, rc):
+    """Called when disconnected from MQTT broker."""
+    client.reconnect()
+
+
+def on_message(client, userdata, msg):
+    """Called each time a message is received on a subscribed topic."""
+    tts_payload = json.loads(msg.payload)
+    if msg.topic == "hermes/tts/say":
+        sentence = tts_payload['text']
+        align, spec, stop_tokens, wav = gerTTS.tts(sentence)
+        file = "/tmp/test.wav"
+        librosa.output.write_wav(file, wav, 22050)
+        os.system("aplay " + file)
+        siteId = tts_payload.get('siteID')
+        if(siteId == None):
+            siteId = "default"
+        id = tts_payload.get('id')
+        if(id == None):
+            client.publish("hermes/tts/sayFinished", json.dumps({"siteId": siteId}))
+        else:
+            client.publish("hermes/tts/sayFinished", json.dumps({"id": id, "siteId": siteId}))
+
+args = getArgs()
+gerTTS = GerTTS(args.tts_model, args.tts_config, args.vocoder_model, args.vocoder_config)
+
+# Create MQTT client and connect to broker
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_disconnect = on_disconnect
+client.on_message = on_message
+
+client.connect("localhost", 1883)
+client.loop_forever()
+print("End")
+
